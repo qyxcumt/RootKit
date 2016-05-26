@@ -481,7 +481,7 @@ NTSTATUS dispatchIOControl
 	case IOCTL_TEST_HIDEDRIVER:
 	{
 		BYTE* driverName;
-		if (inBufferLength < 0 || inputBuffer == NULL) {
+		if (inBufferLength < sizeof(char) || inputBuffer == NULL) {
 			((*IRP).IoStatus).Status = STATUS_INVALID_BUFFER_SIZE;
 			break;
 		}
