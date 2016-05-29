@@ -133,7 +133,7 @@ void removeDriver(DRIVER_SECTION* currentDS)
 	prevDS = ((*currentDS).listEntry).Blink;
 	nextDS = ((*currentDS).listEntry).Flink;
 	(*prevDS).Flink = nextDS;
-	(*nextDS).Flink = prevDS;
+	(*nextDS).Blink = prevDS;
 	((*currentDS).listEntry).Flink = (LIST_ENTRY*)currentDS;
 	((*currentDS).listEntry).Blink = (LIST_ENTRY*)currentDS;
 
